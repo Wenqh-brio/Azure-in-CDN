@@ -1,0 +1,59 @@
+name: Sync Azure Linux ISO
+
+on:
+  workflow_dispatch:          # 允许在 Actions 页面手动触发
+
+permissions:
+  contents: write             # 发布 Release 需要写权限
+
+jobs:
+  sync-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Azure Linux 4.0 x86_64 ISO
+        run: |
+          echo "开始下载 Azure Linux 4.0 ISO..."
+          curl -fL --retry 5 --retry-delay 10 --retry-all-errors \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+            -o AzureLinux-4.0-x86_64.iso \
+            "https://aka.ms/azurelinux-4.0-x86_64.iso"
+          echo "下载完成，文件信息："
+          ls -lh AzureLinux-4.0-x86_64.iso
+
+      - name: Verify downloaded file is a valid ISO
+        run: |
+          echo "检查文件类型..."
+          file AzureLinux-4.0-x86_64.iso
+          if grep -q "CD001" AzureLinux-4.0-x86_64.iso; then
+            echo "✅ 验证通过：这是有效的 ISO 文件"
+          else
+            echo "❌ 验证失败：下载的不是 ISO 文件，可能被 WAF 拦截"
+            echo "文件前 800 字节内容："
+            head -c 800 AzureLinux-4.0-x86_64.iso
+            exit 1
+          fi
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release and upload ISO
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: azurelinux-4.0-${{ steps.date.outputs.date }}-${{ github.run_number }}
+          name: Azure Linux 4.0 x86_64 ISO (${{ steps.date.outputs.date }})
+          body: |
+            Azure Linux 4.0 x86_64 ISO 镜像
+
+            - 来源: https://aka.ms/azurelinux-4.0-x86_64.iso
+            - 下载时间: ${{ steps.date.outputs.date }}
+            - 运行编号: ${{ github.run_number }}
+
+            > 注意：Azure Linux 4.0 仍处于预览阶段，不建议用于生产环境。
+          files: AzureLinux-4.0-x86_64.iso
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: true
