@@ -1,59 +1,106 @@
 name: Sync Azure Linux ISO
 
 on:
-  workflow_dispatch:          # 允许在 Actions 页面手动触发
+  workflow_dispatch:
 
 permissions:
-  contents: write             # 发布 Release 需要写权限
+  contents: write
 
 jobs:
   sync-iso:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - name: Checkout
+      # 1. 检出仓库，启用 LFS 支持
+      - name: Checkout repository with LFS
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Download Azure Linux 4.0 x86_64 ISO
+      # 2. 下载 ISO（带断点续传和重试）
+      - name: Download Azure Linux ISO
         run: |
-          echo "开始下载 Azure Linux 4.0 ISO..."
-          curl -fL --retry 5 --retry-delay 10 --retry-all-errors \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
-            -o AzureLinux-4.0-x86_64.iso \
-            "https://aka.ms/azurelinux-4.0-x86_64.iso"
-          echo "下载完成，文件信息："
-          ls -lh AzureLinux-4.0-x86_64.iso
+          URL="https://aka.ms/azurelinux-4.0-x86_64.iso"
+          FILE="AzureLinux-4.0-x86_64.iso"
+          for i in $(seq 1 20); do
+            echo "===== 下载尝试 $i ====="
+            curl -fL --retry 5 --retry-delay 10 --retry-all-errors \
+              --connect-timeout 30 --max-time 3600 -C - \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+              -o "$FILE" "$URL"
+            if [ -f "$FILE" ] && grep -q "CD001" "$FILE"; then
+              echo "✅ 下载完成"
+              break
+            fi
+            echo "⚠️ 尝试 $i 未完成，5 秒后重试"
+            sleep 5
+          done
+          ls -lh "$FILE"
+          file "$FILE"
 
-      - name: Verify downloaded file is a valid ISO
+      # 3. 校验 ISO
+      - name: Verify ISO
         run: |
-          echo "检查文件类型..."
-          file AzureLinux-4.0-x86_64.iso
-          if grep -q "CD001" AzureLinux-4.0-x86_64.iso; then
-            echo "✅ 验证通过：这是有效的 ISO 文件"
-          else
-            echo "❌ 验证失败：下载的不是 ISO 文件，可能被 WAF 拦截"
-            echo "文件前 800 字节内容："
-            head -c 800 AzureLinux-4.0-x86_64.iso
+          FILE="AzureLinux-4.0-x86_64.iso"
+          if ! grep -q "CD001" "$FILE"; then
+            echo "❌ 不是有效 ISO"
+            head -c 800 "$FILE"
             exit 1
           fi
+          echo "✅ ISO 有效"
 
-      - name: Get current date
+      # 4. 获取日期，用于生成标签
+      - name: Get date
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
-      - name: Create Release and upload ISO
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: azurelinux-4.0-${{ steps.date.outputs.date }}-${{ github.run_number }}
-          name: Azure Linux 4.0 x86_64 ISO (${{ steps.date.outputs.date }})
-          body: |
-            Azure Linux 4.0 x86_64 ISO 镜像
+      # 5. 创建 Release
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="azurelinux-4.0-${{ steps.date.outputs.date }}-${{ github.run_number }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "创建 Release，标签: $TAG"
+          gh release create "$TAG" \
+            --title "Azure Linux 4.0 x86_64 ISO (${{ steps.date.outputs.date }})" \
+            --notes "来源: https://aka.ms/azurelinux-4.0-x86_64.iso
+          下载时间: ${{ steps.date.outputs.date }}
+          运行编号: ${{ github.run_number }}
 
-            - 来源: https://aka.ms/azurelinux-4.0-x86_64.iso
-            - 下载时间: ${{ steps.date.outputs.date }}
-            - 运行编号: ${{ github.run_number }}
+          > Azure Linux 4.0 仍处于预览阶段，不建议用于生产环境。" \
+            --prerelease
+          echo "✅ Release 创建成功"
 
-            > 注意：Azure Linux 4.0 仍处于预览阶段，不建议用于生产环境。
-          files: AzureLinux-4.0-x86_64.iso
-          draft: false
-          prerelease: true
-          fail_on_unmatched_files: true
+      # 6. 上传 ISO 到 Release（带重试）
+      - name: Upload ISO to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "上传到 Release: $TAG"
+          for i in $(seq 1 10); do
+            echo "===== 上传尝试 $i ====="
+            if gh release upload "$TAG" AzureLinux-4.0-x86_64.iso --clobber; then
+              echo "✅ 上传成功"
+              exit 0
+            fi
+            echo "⚠️ 上传失败，10 秒后重试"
+            sleep 10
+          done
+          echo "❌ 上传多次失败"
+          exit 1
+
+      # 7. （可选）将 ISO 提交到 LFS 做版本管理
+      - name: Commit ISO to LFS
+        if: false   # 默认关闭，需要时改为 true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 确保 .gitattributes 已配置 ISO 走 LFS
+          if ! grep -q "AzureLinux.*\.iso" .gitattributes 2>/dev/null; then
+            echo "AzureLinux-4.0-x86_64.iso filter=lfs diff=lfs merge=lfs -text" >> .gitattributes
+          fi
+          git lfs track "AzureLinux-4.0-x86_64.iso"
+          git add .gitattributes AzureLinux-4.0-x86_64.iso
+          git commit -m "chore: sync Azure Linux ISO (${{ steps.date.outputs.date }})"
+          git push
