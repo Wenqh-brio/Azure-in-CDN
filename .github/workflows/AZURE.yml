@@ -1,0 +1,91 @@
+name: Sync Azure Linux 3.0 ISO
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find latest Azure Linux 3.0 release
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "查询微软 azurelinux 仓库的 3.0 版本..."
+          gh release list --repo microsoft/azurelinux --limit 100 > releases.txt
+          cat releases.txt
+          TAG=$(grep -E "3\.0" releases.txt | head -1 | awk '{print $1}')
+          echo "找到标签: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download Azure Linux 3.0 ISO
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.find.outputs.tag }}"
+          echo "从 Release $TAG 下载 ISO..."
+          # 列出该 Release 的所有资产
+          gh release view "$TAG" --repo microsoft/azurelinux --json assets --jq '.assets[].name'
+          # 下载所有 .iso 文件
+          gh release download "$TAG" --repo microsoft/azurelinux \
+            --pattern "*.iso" --dir . --clobber
+          ls -lh *.iso
+
+      - name: Verify ISO
+        run: |
+          ISO=$(ls *.iso | head -1)
+          echo "检查文件: $ISO"
+          file "$ISO"
+          if grep -q "CD001" "$ISO"; then
+            echo "✅ 有效 ISO"
+          else
+            echo "❌ 不是 ISO，可能下载失败"
+            head -c 800 "$ISO"
+            exit 1
+          fi
+
+      - name: Get date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="azurelinux-3.0-${{ steps.date.outputs.date }}-${{ github.run_number }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          ISO=$(ls *.iso | head -1)
+          gh release create "$TAG" \
+            --title "Azure Linux 3.0 ISO (${{ steps.date.outputs.date }})" \
+            --notes "Azure Linux 3.0 稳定版 ISO
+
+          - 来源: https://github.com/microsoft/azurelinux/releases/tag/${{ steps.find.outputs.tag }}
+          - 上游标签: ${{ steps.find.outputs.tag }}
+          - 下载时间: ${{ steps.date.outputs.date }}
+          - 运行编号: ${{ github.run_number }}" \
+            --prerelease
+
+      - name: Upload ISO
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISO=$(ls *.iso | head -1)
+          echo "上传 $ISO 到 $TAG"
+          for i in $(seq 1 10); do
+            echo "===== 上传尝试 $i ====="
+            if gh release upload "$TAG" "$ISO" --clobber; then
+              echo "✅ 上传成功"
+              exit 0
+            fi
+            echo "⚠️ 上传失败，10 秒后重试"
+            sleep 10
+          done
+          exit 1
